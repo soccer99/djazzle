@@ -1,0 +1,10 @@
+# Ignore benchmark results
+benchmark_results/
+*.json
+*.csv
+*.md
+!README.md
+
+# Python cache
+__pycache__/
+*.pyc
