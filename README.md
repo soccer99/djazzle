@@ -306,14 +306,14 @@ Limit and offset results for pagination.
 db.select().from_(users).limit(10).offset(20)()
 ```
 
-#### `orderBy(*columns)`
+#### `order_by(*columns)`
 Order results by columns.
 
 ```python
 from djazzle import asc, desc
 
-db.select().from_(users).orderBy(desc(users.created_at))()
-db.select().from_(users).orderBy(users.name, desc(users.age))()
+db.select().from_(users).order_by(desc(users.created_at))()
+db.select().from_(users).order_by(users.name, desc(users.age))()
 ```
 
 #### `sql` / `params` properties
@@ -333,7 +333,7 @@ query = db.select().from_(users).where(
         in_(users.status, ["active", "pending"]),
         gt(users.age, 18)
     )
-).orderBy(desc(users.created_at)).limit(10)
+).order_by(desc(users.created_at)).limit(10)
 
 print(query.sql)
 # SELECT * FROM "users" WHERE ("status" IN (%s, %s)) AND ("age" > %s) ORDER BY "created_at" DESC LIMIT 10
@@ -385,13 +385,13 @@ db.select().from_(users).where(ilike(users.email, "%@gmail.com"))()
 Check for NULL or NOT NULL values:
 
 ```python
-from djazzle import isNull, isNotNull
+from djazzle import is_null, is_not_null
 
 # Find users without email
-db.select().from_(users).where(isNull(users.email))()
+db.select().from_(users).where(is_null(users.email))()
 
 # Find users with email
-db.select().from_(users).where(isNotNull(users.email))()
+db.select().from_(users).where(is_not_null(users.email))()
 ```
 
 ### List and Range Operations
@@ -429,7 +429,7 @@ db.select().from_(orders).where(
 Use `and_()` and `or_()` to combine multiple conditions with custom logic:
 
 ```python
-from djazzle import and_, or_, eq, gt, isNotNull
+from djazzle import and_, or_, eq, gt, is_not_null
 
 # AND: All conditions must be true
 db.select().from_(users).where(
@@ -457,7 +457,7 @@ db.select().from_(users).where(
             eq(users.status, "pending")
         ),
         gt(users.age, 18),
-        isNotNull(users.email)
+        is_not_null(users.email)
     )
 )()
 # SQL: WHERE ((status = 'active') OR (status = 'pending')) AND (age > 18) AND (email IS NOT NULL)
