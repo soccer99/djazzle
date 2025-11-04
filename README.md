@@ -90,10 +90,15 @@ from src.djazzle import TableFromModel, DjazzleQuery, eq
 from myapp.models import User
 
 users = TableFromModel(User)
+
+# Setup DjazzleQuery with a db connection
+# Default is django.db.connections["default"]
+# Can also pass in secondary db:
+# db = DjazzleQuery(conn=connections['other_db'])
 db = DjazzleQuery()
 
 # SELECT queries
-rows = db.select("id", "name").from_(users).where(eq(users.id, 42))()
+rows = db.select(users.id, users.name).from_(users).where(eq(users.id, 42))()
 >>> [{ "id": 1, "name": "John" }]
 
 rows = db.select().from_(users).where(eq(users.id, 42)).as_model()()
@@ -297,6 +302,21 @@ While Djazzle uses Django's default database connection out of the box, you can 
 - **pymysql** - Pure Python MySQL driver (sync only)
 - **aiomysql** - Async MySQL driver (async only)
 - **asyncmy** - Another async MySQL driver (async only)
+
+### Django database connections (default)
+
+```python
+from django.db import connections
+from djazzle import DjazzleQuery, TableFromModel
+from myapp.models import User
+
+users = TableFromModel(User)
+
+# The default connection if nothing is passed in is django.db.connections["default"]
+# You may use a specific Django connection from your settings.DATABASES
+db = DjazzleQuery(conn=connections['other_db'])
+results = db.select().from_(users)()
+```
 
 ### psycopg2 (PostgreSQL - Sync)
 
