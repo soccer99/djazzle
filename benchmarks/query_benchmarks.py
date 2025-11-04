@@ -6,7 +6,7 @@ Use run_benchmarks.py in the project root for standalone execution.
 """
 
 from tests.models import User
-from src.djazzle import TableFromModel, DjazzleQuery, eq, desc
+from src.djazzle import TableFromModel, DjazzleQuery, eq, desc, like
 from .benchmark_runner import BenchmarkRunner
 
 
@@ -51,7 +51,7 @@ def run_all_benchmarks(
         BenchmarkRunner with all results
     """
     # Setup
-    num_tests = 6
+    num_tests = 10
     setup_test_data(num_records)
     runner = BenchmarkRunner(output_dir=output_dir)
 
@@ -172,6 +172,174 @@ def run_all_benchmarks(
         warmup=10
     )
 
+    # Benchmark 7: INSERT Single Record
+    print(f"7/{num_tests} INSERT single record...")
+
+    # Track IDs to delete later
+    django_insert_ids = []
+    djazzle_insert_ids = []
+
+    def django_insert():
+        user = User.objects.create(
+            name="BenchmarkUser",
+            age=30,
+            email="benchmark@test.com",
+            username="benchmark_user",
+            address="123 Benchmark St"
+        )
+        django_insert_ids.append(user.id)
+        return [user]
+
+    def djazzle_insert():
+        # Note: We can't use returning() for MySQL compatibility
+        # So we'll just do the insert without returning
+        result = DjazzleQuery().insert(users_table).values({
+            "name": "BenchmarkUser",
+            "age": 30,
+            "email": "benchmark@test.com",
+            "username": "benchmark_user",
+            "address": "123 Benchmark St"
+        })()
+        return result
+
+    runner.run_comparison(
+        name="INSERT Single Record",
+        description="Insert one record into database",
+        django_func=django_insert,
+        djazzle_func=djazzle_insert,
+        iterations=iterations,
+        warmup=10
+    )
+
+    # Clean up inserted records
+    User.objects.filter(name="BenchmarkUser").delete()
+
+    # Benchmark 8: UPDATE Single Record
+    print(f"8/{num_tests} UPDATE single record...")
+
+    # Create a record to update
+    test_user = User.objects.create(
+        name="UpdateTest",
+        age=25,
+        email="update@test.com",
+        username="update_test",
+        address="456 Update St"
+    )
+
+    def django_update():
+        User.objects.filter(id=test_user.id).update(age=26)
+        return None
+
+    def djazzle_update():
+        result = DjazzleQuery().update(users_table).set({"age": 26}).where(
+            eq(users_table.id, test_user.id)
+        )()
+        return result
+
+    runner.run_comparison(
+        name="UPDATE Single Record",
+        description="Update one record in database",
+        django_func=django_update,
+        djazzle_func=djazzle_update,
+        iterations=iterations,
+        warmup=10
+    )
+
+    # Clean up test user
+    test_user.delete()
+
+    # Benchmark 9: Bulk INSERT (100 records)
+    print(f"9/{num_tests} Bulk INSERT (100 records)...")
+
+    def django_bulk_insert():
+        users = [
+            User(
+                name=f"BulkUser{i}",
+                age=20 + (i % 50),
+                email=f"bulk{i}@test.com",
+                username=f"bulk_user_{i}",
+                address=f"{i} Bulk St"
+            )
+            for i in range(100)
+        ]
+        created = User.objects.bulk_create(users)
+        # Delete immediately to avoid bloat
+        User.objects.filter(name__startswith="BulkUser").delete()
+        return created
+
+    def djazzle_bulk_insert():
+        values = [
+            {
+                "name": f"BulkUser{i}",
+                "age": 20 + (i % 50),
+                "email": f"bulk{i}@test.com",
+                "username": f"bulk_user_{i}",
+                "address": f"{i} Bulk St"
+            }
+            for i in range(100)
+        ]
+        result = DjazzleQuery().insert(users_table).values(values)()
+        # Delete immediately to avoid bloat
+        User.objects.filter(name__startswith="BulkUser").delete()
+        return result
+
+    runner.run_comparison(
+        name="Bulk INSERT (100 records)",
+        description="Insert 100 records in one operation",
+        django_func=django_bulk_insert,
+        djazzle_func=djazzle_bulk_insert,
+        iterations=iterations // 2,  # Fewer iterations for bulk operations
+        warmup=5
+    )
+
+    # Benchmark 10: Bulk UPDATE (100 records)
+    print(f"10/{num_tests} Bulk UPDATE (100 records)...")
+
+    # Create 100 records to update
+    bulk_update_users = []
+    for i in range(100):
+        bulk_update_users.append(
+            User(
+                name=f"UpdateBulk{i}",
+                age=20,
+                email=f"updatebulk{i}@test.com",
+                username=f"update_bulk_{i}",
+                address=f"{i} Update St"
+            )
+        )
+    User.objects.bulk_create(bulk_update_users)
+
+    # Get the IDs after creation
+    update_user_ids = list(User.objects.filter(name__startswith="UpdateBulk").values_list('id', flat=True))
+
+    def django_bulk_update():
+        User.objects.filter(name__startswith="UpdateBulk").update(age=25)
+        # Reset for next iteration
+        User.objects.filter(name__startswith="UpdateBulk").update(age=20)
+        return None
+
+    def djazzle_bulk_update():
+        # Update all records with name starting with UpdateBulk
+        result = DjazzleQuery().update(users_table).set({"age": 25}).where(
+            like(users_table.name, "UpdateBulk%")
+        )()
+        # Reset for next iteration
+        DjazzleQuery().update(users_table).set({"age": 20}).where(
+            like(users_table.name, "UpdateBulk%")
+        )()
+        return result
+
+    runner.run_comparison(
+        name="Bulk UPDATE (100 records)",
+        description="Update 100 records in one operation",
+        django_func=django_bulk_update,
+        djazzle_func=djazzle_bulk_update,
+        iterations=iterations // 2,  # Fewer iterations for bulk operations
+        warmup=5
+    )
+
+    # Clean up bulk update test records
+    User.objects.filter(name__startswith="UpdateBulk").delete()
 
     print("\nBenchmarks complete!\n")
     return runner

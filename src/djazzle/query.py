@@ -5,6 +5,7 @@ from .conditions import Condition, CompoundCondition
 from .exceptions import InvalidColumnError
 from django.db import models
 from .columns import Column, OrderDirection, Alias
+from asgiref.sync import sync_to_async
 
 
 T = TypeVar("T", bound=models.Model)
@@ -91,6 +92,10 @@ class DjazzleQuery:
             self._insert_values = data
         else:
             raise ValueError("values() must receive a dict or list of dicts")
+
+        # Validate types for each row
+        self._validate_value_types(self._insert_values)
+
         return self
 
     def returning(self, *fields: str) -> "DjazzleQuery":
@@ -130,6 +135,10 @@ class DjazzleQuery:
         # Filter out None values are actually kept (to set NULL)
         # But we could filter undefined if we had a special sentinel
         self._update_values = data
+
+        # Validate types
+        self._validate_value_types([data])
+
         return self
 
     def delete(self, table: TableFromModel) -> "DjazzleQuery":
@@ -224,6 +233,42 @@ class DjazzleQuery:
         """
         self._order_by.extend(columns)
         return self
+
+    def _validate_value_types(self, rows: list[Dict[str, Any]]) -> None:
+        """
+        Validate that the types of values match the expected types for each column.
+
+        Args:
+            rows: List of dictionaries with column names as keys and values to validate
+
+        Raises:
+            TypeError: If a value's type doesn't match the column's valid types
+        """
+        if not self._table:
+            return  # Can't validate without table
+
+        for row_idx, row in enumerate(rows):
+            for col_name, value in row.items():
+                # Get the column object from the table
+                if not hasattr(self._table, col_name):
+                    # Column validation will catch this later
+                    continue
+
+                column = getattr(self._table, col_name)
+                if not isinstance(column, Column):
+                    continue
+
+                # Check if the value type is valid
+                valid_types = column.valid_types
+                if not isinstance(value, valid_types):
+                    # Build a helpful error message
+                    type_names = ", ".join(t.__name__ for t in valid_types)
+                    actual_type = type(value).__name__
+                    row_info = f" (row {row_idx})" if len(rows) > 1 else ""
+                    raise TypeError(
+                        f"Invalid type for column '{col_name}'{row_info}: "
+                        f"expected {type_names}, got {actual_type}"
+                    )
 
     def _validate_columns(self):
         if not self._table:
@@ -620,8 +665,92 @@ class DjazzleQuery:
                     results = [dict(zip(columns, row)) for row in cur.fetchall()]
                     return results
 
+    async def _aexecute(self):
+        """
+        Async version of query execution using Django's async database support.
+
+        Returns:
+            Query results (same format as synchronous execution)
+
+        Note:
+            This method uses sync_to_async to safely execute database operations
+            in async contexts. It obtains the database connection inside the sync
+            context to avoid thread-safety issues, as per Django 5.2+ guidelines.
+        """
+        sql, params = self._build_sql()
+        query_type = self._query_type
+        returning_fields = self._returning_fields
+        as_model = self._as_model
+        table = self._table
+
+        # Use sync_to_async to wrap the synchronous database operation
+        # IMPORTANT: We must get the connection inside the sync context, not pass it
+        # across thread boundaries. Django's connection is thread-local.
+        @sync_to_async
+        def execute_query():
+            # Get the thread-local connection inside the sync context
+            # This is critical for thread safety in Django 5.2+
+            from django.db import connection as thread_local_conn
+
+            with thread_local_conn.cursor() as cur:
+                cur.execute(sql, params)
+
+                if query_type == "insert":
+                    # Handle INSERT queries
+                    if returning_fields is not None:
+                        # RETURNING clause specified, fetch results
+                        columns = [desc[0] for desc in cur.description]
+                        results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                        return results
+                    else:
+                        # No RETURNING, return None
+                        return None
+                elif query_type == "update":
+                    # Handle UPDATE queries
+                    if returning_fields is not None:
+                        # RETURNING clause specified, fetch results
+                        columns = [desc[0] for desc in cur.description]
+                        results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                        return results
+                    else:
+                        # No RETURNING, return None
+                        return None
+                elif query_type == "delete":
+                    # Handle DELETE queries
+                    if returning_fields is not None:
+                        # RETURNING clause specified, fetch results
+                        columns = [desc[0] for desc in cur.description]
+                        results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                        return results
+                    else:
+                        # No RETURNING, return None
+                        return None
+                else:
+                    # Handle SELECT queries
+                    columns = [desc[0] for desc in cur.description]
+
+                    if as_model:
+                        # Use from_db() for faster model instantiation - bypasses __init__
+                        model_cls: type[models.Model] = table.model_class
+                        db_alias = thread_local_conn.alias
+                        return [
+                            model_cls.from_db(db_alias, columns, row)
+                            for row in cur.fetchall()
+                        ]
+                    else:
+                        results = [dict(zip(columns, row)) for row in cur.fetchall()]
+                        return results
+
+        return await execute_query()
+
     def __await__(self):
-        return self._execute().__await__()
+        """
+        Allow using the query with await syntax.
+
+        Example:
+            result = await db.select().from_(users)()
+        """
+        return self._aexecute().__await__()
 
     def __call__(self):
         return self._execute()

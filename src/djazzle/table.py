@@ -16,7 +16,7 @@ class TableFromModel(Generic[T]):
 
         for field in model_class._meta.get_fields():
             if hasattr(field, "column") and field.column:
-                col = Column(self.db_table_name, field.column)
+                col = Column(self.db_table_name, field.column, django_field=field)
                 setattr(self, field.name, col)
                 self.column_names.add(field.name)
 
@@ -24,7 +24,7 @@ class TableFromModel(Generic[T]):
                 if isinstance(field, models.ForeignKey):
                     # Django creates an {field_name}_id column for foreign keys
                     id_field_name = f"{field.name}_id"
-                    id_col = Column(self.db_table_name, f"{field.column}_id")
+                    id_col = Column(self.db_table_name, f"{field.column}_id", django_field=field)
                     setattr(self, id_field_name, id_col)
                     self.column_names.add(id_field_name)
 

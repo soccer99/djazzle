@@ -494,3 +494,202 @@ class DjazzleTestCase(TestCase):
         self.assertIn('"name"', sql)
         self.assertIn('"name" AS "pet_name"', sql)
         self.assertIn("LEFT JOIN", sql)
+
+
+class AsyncDjazzleTestCase(TestCase):
+    """Test async query execution support."""
+
+    @classmethod
+    def setUpTestData(cls):
+        User.objects.create(
+            name="AsyncUser1",
+            age=25,
+            email="async1@example.com",
+            username="async1",
+            address="123 Async St"
+        )
+        User.objects.create(
+            name="AsyncUser2",
+            age=30,
+            email="async2@example.com",
+            username="async2",
+            address="456 Async Ave"
+        )
+
+    async def test_async_select_query(self):
+        """Test async SELECT queries using await syntax."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Use await syntax without () - this calls __await__() which uses _aexecute()
+        rows = await db.select("id", "name", "age").from_(users).where(eq(users.name, "AsyncUser1"))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "AsyncUser1")
+        self.assertEqual(rows[0]["age"], 25)
+
+    async def test_async_select_all(self):
+        """Test async SELECT * query."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        rows = await db.select().from_(users)
+
+        # Should have at least our 2 test users
+        async_users = [r for r in rows if r["name"].startswith("AsyncUser")]
+        self.assertGreaterEqual(len(async_users), 2)
+
+    async def test_async_select_as_model(self):
+        """Test async SELECT returning model instances."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        rows = await db.select().from_(users).where(eq(users.name, "AsyncUser2")).as_model()
+
+        self.assertEqual(len(rows), 1)
+        user = rows[0]
+        self.assertIsInstance(user, User)
+        self.assertEqual(user.name, "AsyncUser2")
+        self.assertEqual(user.age, 30)
+
+    async def test_async_insert(self):
+        """Test async INSERT query."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Insert without returning
+        result = await db.insert(users).values({
+            "name": "AsyncInsert",
+            "age": 35,
+            "email": "asyncinsert@example.com",
+            "username": "async_insert",
+            "address": "789 Insert Ln"
+        })
+
+        self.assertIsNone(result)
+
+        # Verify it was inserted
+        rows = await db.select().from_(users).where(eq(users.name, "AsyncInsert"))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "AsyncInsert")
+        self.assertEqual(rows[0]["age"], 35)
+
+    async def test_async_insert_with_returning(self):
+        """Test async INSERT with RETURNING clause."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Insert with returning (PostgreSQL)
+        result = await db.insert(users).values({
+            "name": "AsyncReturn",
+            "age": 40,
+            "email": "asyncreturn@example.com",
+            "username": "async_return",
+            "address": "321 Return Rd"
+        }).returning()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "AsyncReturn")
+        self.assertEqual(result[0]["age"], 40)
+        self.assertIsNotNone(result[0]["id"])
+
+    async def test_async_update(self):
+        """Test async UPDATE query."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Create a user to update
+        user = await User.objects.acreate(
+            name="AsyncUpdateTest",
+            age=20,
+            email="asyncupdate@example.com",
+            username="async_update",
+            address="111 Update St"
+        )
+
+        # Update using Djazzle
+        result = await db.update(users).set({"age": 21}).where(eq(users.id, user.id))
+        self.assertIsNone(result)
+
+        # Verify the update
+        rows = await db.select().from_(users).where(eq(users.id, user.id))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["age"], 21)
+
+        # Clean up
+        await user.adelete()
+
+    async def test_async_update_with_returning(self):
+        """Test async UPDATE with RETURNING clause."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Create a user to update
+        user = await User.objects.acreate(
+            name="AsyncUpdateReturn",
+            age=50,
+            email="asyncupdatereturn@example.com",
+            username="async_update_return",
+            address="222 Update Ave"
+        )
+
+        # Update with returning (PostgreSQL)
+        result = await db.update(users).set({"age": 51}).where(
+            eq(users.id, user.id)
+        ).returning()
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["age"], 51)
+        self.assertEqual(result[0]["id"], user.id)
+
+        # Clean up
+        await user.adelete()
+
+    async def test_async_delete(self):
+        """Test async DELETE query."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        # Create a user to delete
+        user = await User.objects.acreate(
+            name="AsyncDeleteTest",
+            age=60,
+            email="asyncdelete@example.com",
+            username="async_delete",
+            address="333 Delete Blvd"
+        )
+
+        # Delete using Djazzle
+        result = await db.delete(users).where(eq(users.id, user.id))
+        self.assertIsNone(result)
+
+        # Verify it was deleted
+        rows = await db.select().from_(users).where(eq(users.id, user.id))
+        self.assertEqual(len(rows), 0)
+
+    async def test_async_bulk_insert(self):
+        """Test async bulk INSERT."""
+        users = TableFromModel(User)
+        db = DjazzleQuery()
+
+        values = [
+            {
+                "name": f"AsyncBulk{i}",
+                "age": 20 + i,
+                "email": f"asyncbulk{i}@example.com",
+                "username": f"async_bulk_{i}",
+                "address": f"{i} Bulk St"
+            }
+            for i in range(5)
+        ]
+
+        result = await db.insert(users).values(values)
+        self.assertIsNone(result)
+
+        # Verify they were inserted
+        rows = await db.select().from_(users)
+        bulk_users = [r for r in rows if r["name"].startswith("AsyncBulk")]
+        self.assertEqual(len(bulk_users), 5)
+
+        # Clean up
+        await User.objects.filter(name__startswith="AsyncBulk").adelete()

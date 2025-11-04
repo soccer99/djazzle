@@ -8,8 +8,55 @@ Djazzle is a Drizzle-inspired query builder for Django projects.
 - Type-safe returns
 - Hybrid model/dict return
 - Chainable, Drizzle-inspired API
-- **Significantly faster than Django ORM** (37-81% faster in benchmarks)
+- **Full async/await support** for modern Django applications
+- **Runtime type checking** for INSERT and UPDATE operations
+- **Significantly faster than Django ORM** (up to 76% faster in benchmarks)
 - Works with PostgreSQL, MySQL, and SQLite
+
+## Why?
+
+The Django ORM is great, but if you've used SQL directly or other query builders like SQLAlchemy or Drizzle, 
+you might find yourself wanting something different.
+
+Djazzle gives you a query builder that looks and feels more like raw SQL. 
+If you're the type who thinks in SQL rather than Django's abstraction, this will feel more natural. 
+You write queries that map pretty directly to the SQL that gets executed, which makes it easier to reason about what's actually happening.
+
+You don't have to switch completely, this can work in tandem with the Django ORM if you want.
+
+It also encourages you to be explicit about what data you're loading. 
+With the ORM, it's easy to accidentally fetch entire model instances when you only need a couple fields. 
+Djazzle makes it obvious when you're selecting everything vs. just the columns you need.
+
+Performance-wise, it's faster than the Django ORM (see the benchmarks below). 
+For most apps this won't matter much, but we want to keep pushing the boundaries of what Django can do.
+We need to continue making improvements if we want to stay relevant when the topic of conversation is always with speed-focused frameworks
+like Node's Fastify and Hono, or the Rust/Go web frameworks.
+
+Finally, if you're coming from another ecosystem—especially if you're used to SQLAlchemy or similar query builders—Djazzle will feel more familiar than Django's ORM syntax. It's nice to have an option that might make Django more approachable to folks from other backgrounds.
+
+## Q&A
+
+> Why not just use raw SQL?
+>
+> You can! But Djazzle gives you type safety, automatic parameter binding, and integrates with your Django models. It's a middle ground between raw SQL and the full ORM.
+
+> Does this work with my existing Django project?
+>
+> Yes. Djazzle works alongside the Django ORM—you don't have to replace anything. Just import it and use it where you want. Your models, migrations, and everything else stay exactly the same.
+
+> Can I still use Django's relationships and foreign keys?
+>
+> Djazzle uses your Django models, so all your relationships are there. For querying across relationships, you'll use JOINs instead of Django's `select_related` or `prefetch_related`. Check out the JOIN examples in the API reference.
+
+> Is this production ready?
+>
+> It works, but it's a new project. Test it thoroughly before using it in production. The API might change as we get feedback from real usage.
+
+> Did you use AI?
+>
+> Yes. I came up with the idea and then used a mix of ChatGPT and Claude Code to set this up. I steered it in the direction I wanted, and made a lot of changes myself until I was happy with it.
+
 
 ## Database Compatibility
 
@@ -64,6 +111,173 @@ result = db.update(users).set({"name": "Mr. John"}).where(eq(users.id, 1)).retur
 result = db.delete(users).where(eq(users.name, "Andrew")).returning()()
 >>> [{"id": 2, "name": "Andrew", "age": 25}]
 ```
+
+## Runtime Type Checking
+
+Djazzle automatically validates that the values you're inserting or updating match the expected types for each column. This catches type errors before they hit the database, making debugging easier.
+
+### How It Works
+
+When you call `values()` or `set()`, Djazzle checks each value against the Django field type:
+
+```python
+users = TableFromModel(User)
+db = DjazzleQuery()
+
+# This works fine - age is an integer
+db.insert(users).values({"name": "John", "age": 25})()
+
+# This raises TypeError - age should be int, not str
+db.insert(users).values({"name": "John", "age": "twenty-five"})()
+# TypeError: Invalid type for column 'age': expected int, NoneType, got str
+```
+
+### Supported Field Types
+
+Djazzle maps Django field types to Python types automatically:
+
+- **CharField, TextField, EmailField**: expects `str`
+- **IntegerField, BigIntegerField**: expects `int`
+- **FloatField, DecimalField**: expects `float` or `int`
+- **BooleanField**: expects `bool`
+- **DateField, DateTimeField, TimeField**: expects `str` (or date/datetime objects)
+- **JSONField**: expects `dict`, `list`, `str`, `int`, `float`, or `bool`
+- **ForeignKey**: expects `int` (the foreign key ID)
+
+### Nullable Fields
+
+If a field has `null=True`, the type checker automatically allows `None`:
+
+```python
+# Assuming age has null=True
+db.insert(users).values({"name": "John", "age": None})()  # Works fine
+```
+
+### Bulk Inserts
+
+Type checking works with bulk inserts too, and the error message tells you which row failed:
+
+```python
+db.insert(users).values([
+    {"name": "User 1", "age": 25},
+    {"name": "User 2", "age": "thirty"},  # Wrong type
+])()
+# TypeError: Invalid type for column 'age' (row 1): expected int, NoneType, got str
+```
+
+### Updates
+
+Type checking applies to `set()` as well:
+
+```python
+db.update(users).set({"age": "thirty"}).where(eq(users.id, 1))()
+# TypeError: Invalid type for column 'age': expected int, NoneType, got str
+```
+
+## Async Support
+
+Djazzle fully supports async/await syntax, making it perfect for async Django views and APIs. The async implementation uses Django's `sync_to_async` to safely execute database operations in async contexts.
+
+### Basic Async Usage
+
+To use Djazzle asynchronously, simply use `await` with your query (without calling `()`):
+
+```python
+from src.djazzle import TableFromModel, DjazzleQuery, eq
+from myapp.models import User
+
+users = TableFromModel(User)
+db = DjazzleQuery()
+
+# Async SELECT
+async def get_user(user_id):
+    rows = await db.select().from_(users).where(eq(users.id, user_id))
+    return rows[0] if rows else None
+
+# Async INSERT
+async def create_user(name, age):
+    result = await db.insert(users).values({
+        "name": name,
+        "age": age,
+        "email": f"{name}@example.com",
+        "username": name.lower(),
+        "address": "123 Main St"
+    }).returning()
+    return result[0]
+
+# Async UPDATE
+async def update_user_age(user_id, new_age):
+    await db.update(users).set({"age": new_age}).where(eq(users.id, user_id))
+
+# Async DELETE
+async def delete_user(user_id):
+    await db.delete(users).where(eq(users.id, user_id))
+```
+
+### Sync vs Async Syntax
+
+**Synchronous** (use `()` to execute):
+```python
+rows = db.select().from_(users)()
+```
+
+**Asynchronous** (use `await` without `()`):
+```python
+rows = await db.select().from_(users)
+```
+
+### Async with Django Views
+
+Perfect for async Django views:
+
+```python
+from django.http import JsonResponse
+from src.djazzle import TableFromModel, DjazzleQuery, eq
+from .models import User
+
+async def user_detail(request, user_id):
+    users = TableFromModel(User)
+    db = DjazzleQuery()
+
+    rows = await db.select().from_(users).where(eq(users.id, user_id))
+
+    if not rows:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    return JsonResponse(rows[0])
+```
+
+### Async Model Instances
+
+You can also return Django model instances asynchronously:
+
+```python
+async def get_user_models():
+    users = TableFromModel(User)
+    db = DjazzleQuery()
+
+    # Returns list of User model instances
+    user_objects = await db.select().from_(users).as_model()
+    return user_objects
+```
+
+### Important Notes
+
+- **Don't mix syntax**: When using `await`, omit the `()` call operator
+- **Works with all query types**: SELECT, INSERT, UPDATE, DELETE all support async
+- **Thread-safe**: Uses `sync_to_async` for proper thread isolation
+- **Django 4.2+ compatible**: Follows Django's async best practices by obtaining database connections inside the sync context, avoiding thread-safety issues
+- **Same performance**: Async queries are as fast as synchronous ones
+
+### Technical Details
+
+Djazzle's async implementation follows Django 4.2+ guidelines for safe async database access:
+
+1. **Thread-local connections**: The async implementation obtains database connections from Django's thread-local storage inside the `sync_to_async` wrapper, not from the query builder's state
+2. **No connection sharing**: Database connection objects are never passed across thread boundaries
+3. **Proper isolation**: Each async query executes in its own thread-safe context using Django's connection management
+
+This design ensures compatibility with Django's async views, middleware, and the ASGI server ecosystem.
 
 ## API Reference
 
@@ -514,6 +728,30 @@ Order By Name desc
   Django ORM:  24.9691ms (± 4.7044ms)
   Djazzle:     9.4522ms (± 0.2500ms)
   Result:      Djazzle is 62.14% FASTER
+
+INSERT Single Record
+  Description: Insert one record into database
+  Django ORM:  0.0467ms (± 0.0018ms)
+  Djazzle:     0.0203ms (± 0.0004ms)
+  Result:      Djazzle is 56.54% FASTER
+
+Bulk INSERT (100 records)
+  Description: Insert 100 records in one operation
+  Django ORM:  2.5146ms (± 1.9854ms)
+  Djazzle:     1.8699ms (± 0.0320ms)
+  Result:      Djazzle is 25.64% FASTER
+
+UPDATE Single Record
+  Description: Update one record in database
+  Django ORM:  0.0532ms (± 0.0026ms)
+  Djazzle:     0.0124ms (± 0.0010ms)
+  Result:      Djazzle is 76.77% FASTER
+
+Bulk UPDATE (100 records)
+  Description: Update 100 records in one operation
+  Django ORM:  0.2251ms (± 0.0077ms)
+  Djazzle:     0.1338ms (± 0.0059ms)
+  Result:      Djazzle is 40.55% FASTER
 ```
 
 See [benchmarks/README.md](benchmarks/README.md) for detailed performance analysis.
@@ -528,3 +766,38 @@ python run_benchmarks.py \
 ```
 
 This will generate detailed performance reports in JSON, CSV, and Markdown formats.
+
+## Testing
+
+Djazzle includes a comprehensive test suite with support for testing against multiple database backends.
+
+### Run tests with SQLite (default)
+
+```bash
+uv run pytest
+```
+
+### Run tests with PostgreSQL or MySQL
+
+Test against real PostgreSQL or MySQL databases using testcontainers (requires Docker):
+
+```bash
+# Install testcontainers extra
+uv sync --extra testcontainers
+
+# Run tests against PostgreSQL
+uv run pytest --db postgres
+
+# Run tests against MySQL
+uv run pytest --db mysql
+```
+
+Testcontainers automatically spins up a Docker container with PostgreSQL or MySQL, runs your tests against it, and tears it down when finished. This ensures you're testing against real database behavior without manual setup.
+
+**Benefits:**
+- Tests real database-specific features (like PostgreSQL's `RETURNING` clause)
+- Automatic container management
+- Clean state for every test session
+- No local database setup required
+
+See [TESTING.md](TESTING.md) for detailed testing documentation, including troubleshooting and writing tests for specific databases.
