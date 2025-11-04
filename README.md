@@ -92,7 +92,7 @@ db.select(users.id, users.name.as_("user_name"), "age").from_(users)()
 # With JOINs
 db.select(users.name, pets.name.as_("pet_name"))\
     .from_(users)\
-    .leftJoin(pets, eq(users.id, pets.owner_id))()
+    .left_join(pets, eq(users.id, pets.owner_id))()
 # SELECT "name", "name" AS "pet_name" FROM "users"
 # LEFT JOIN "pets" ON "users"."id" = "pets"."owner_id"
 ```
@@ -236,36 +236,36 @@ db.delete(users).where(eq(users.name, "Dan")).limit(2)()
 
 #### JOIN Queries
 
-##### `leftJoin(table, condition)`
+##### `left_join(table, condition)`
 Perform a LEFT JOIN.
 
 ```python
 # Basic LEFT JOIN
-db.select().from_(users).leftJoin(pets, eq(users.id, pets.owner_id))()
+db.select().from_(users).left_join(pets, eq(users.id, pets.owner_id))()
 
 # With WHERE clause
-db.select().from_(users).leftJoin(pets, eq(users.id, pets.owner_id)).where(eq(users.age, 25))()
+db.select().from_(users).left_join(pets, eq(users.id, pets.owner_id)).where(eq(users.age, 25))()
 ```
 
-##### `innerJoin(table, condition)`
+##### `inner_join(table, condition)`
 Perform an INNER JOIN.
 
 ```python
-db.select().from_(users).innerJoin(pets, eq(users.id, pets.owner_id))()
+db.select().from_(users).inner_join(pets, eq(users.id, pets.owner_id))()
 ```
 
-##### `rightJoin(table, condition)`
+##### `right_join(table, condition)`
 Perform a RIGHT JOIN.
 
 ```python
-db.select().from_(users).rightJoin(pets, eq(users.id, pets.owner_id))()
+db.select().from_(users).right_join(pets, eq(users.id, pets.owner_id))()
 ```
 
-##### `fullJoin(table, condition)`
+##### `full_join(table, condition)`
 Perform a FULL JOIN.
 
 ```python
-db.select().from_(users).fullJoin(pets, eq(users.id, pets.owner_id))()
+db.select().from_(users).full_join(pets, eq(users.id, pets.owner_id))()
 ```
 
 ##### Partial Select with JOINs
@@ -277,7 +277,7 @@ db.select(
     "users.name",
     "pets.id",
     "pets.name"
-).from_(users).leftJoin(pets, eq(users.id, pets.owner_id))()
+).from_(users).left_join(pets, eq(users.id, pets.owner_id))()
 
 # SQL: SELECT "users"."id", "users"."name", "pets"."id", "pets"."name"
 #      FROM "users" LEFT JOIN "pets" ON "users"."id" = "pets"."owner_id"
@@ -288,8 +288,8 @@ Chain multiple JOINs together:
 
 ```python
 db.select().from_(users)\
-    .leftJoin(pets, eq(users.id, pets.owner_id))\
-    .innerJoin(orders, eq(users.id, orders.user_id))()
+    .left_join(pets, eq(users.id, pets.owner_id))\
+    .inner_join(orders, eq(users.id, orders.user_id))()
 ```
 
 #### `where(*conditions)`
