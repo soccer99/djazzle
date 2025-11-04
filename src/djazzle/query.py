@@ -1,5 +1,5 @@
 from django.db import connection
-from typing import TypeVar, Dict, Any, Union, Optional
+from typing import TypeVar, Dict, Any, Union
 from .table import TableFromModel
 from .conditions import Condition, CompoundCondition
 from .exceptions import InvalidColumnError

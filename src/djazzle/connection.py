@@ -1,6 +1,5 @@
 """Database connection adapter for supporting multiple connection types."""
 
-from typing import Any, Optional
 
 
 class ConnectionAdapter:

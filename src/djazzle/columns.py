@@ -1,3 +1,4 @@
+from functools import lru_cache
 from uuid import UUID
 from django.db import models
 
@@ -24,13 +25,14 @@ class Column:
         return Alias(self, alias_name)
 
     @property
+    @lru_cache
     def valid_types(self) -> tuple:
         """
         Return a tuple of valid Python types for this column based on its Django field type.
         Always includes None if the field is nullable.
         """
-        if not self.django_field:
-            # If no Django field is available, allow any type
+        field = getattr(self, "django_field", None)
+        if not field:
             return (object,)
 
         # Map Django field types to Python types
@@ -60,23 +62,18 @@ class Column:
             models.OneToOneField: (int, str, UUID),
         }
 
-        # Get the base field type
-        field_class = type(self.django_field)
+        # find the first matching type using isinstance
+        valid = next(
+            (
+                types
+                for field_type, types in field_type_map.items()
+                if isinstance(field, field_type)
+            ),
+            (object,),
+        )
 
-        # Find the matching type mapping
-        valid = None
-        for field_type, python_types in field_type_map.items():
-            if isinstance(self.django_field, field_type):
-                valid = python_types
-                break
-
-        # Default to allowing any type if we don't have a specific mapping
-        if valid is None:
-            valid = (object,)
-
-        # If field is nullable, add None to the valid types
-        if hasattr(self.django_field, 'null') and self.django_field.null:
-            valid = valid + (type(None),)
+        if getattr(field, "null", False):
+            valid += (type(None),)
 
         return valid
 

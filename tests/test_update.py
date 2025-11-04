@@ -103,3 +103,15 @@ class TestUpdate:
         assert "WHERE" in sql
         assert 35 in params
         assert test_user.id in params
+
+    def test_invalid_type_raises(self, db, users_table, test_user):
+        """Test that setting a column to an invalid type raises TypeError."""
+        # Attempt to set age (IntegerField) to a string
+        with pytest.raises(TypeError) as exc_info:
+            db.update(users_table).set({"age": "not-an-integer"}).where(
+                eq(users_table.id, test_user.id)
+            )()
+
+        # Optional: check that the error message contains expected info
+        assert "Invalid type for column 'age'" in str(exc_info.value)
+        assert "expected int" in str(exc_info.value) or "got str" in str(exc_info.value)

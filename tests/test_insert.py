@@ -122,3 +122,19 @@ class TestInsert:
         assert "age" in sql
         assert "Test" in params
         assert 25 in params
+
+    def test_invalid_type_raises(self, db, users_table):
+        """Test that setting a column to an invalid type raises TypeError."""
+        # Attempt to set age (IntegerField) to a string
+        with pytest.raises(TypeError) as exc_info:
+            db.insert(users_table).values({
+            "name": "Test",
+            "age": "not-an-integer",
+            "email": "test@example.com",
+            "username": "test",
+            "address": "123 Test St"
+        })
+
+        # Optional: check that the error message contains expected info
+        assert "Invalid type for column 'age'" in str(exc_info.value)
+        assert "expected int" in str(exc_info.value) or "got str" in str(exc_info.value)
