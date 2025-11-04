@@ -279,6 +279,165 @@ Djazzle's async implementation follows Django 4.2+ guidelines for safe async dat
 
 This design ensures compatibility with Django's async views, middleware, and the ASGI server ecosystem.
 
+## Custom Database Connections
+
+While Djazzle uses Django's default database connection out of the box, you can also use your own database connections. This is useful when you want to:
+
+- Use a different database than your Django settings
+- Manage connection pools yourself
+- Use native async database drivers
+- Integrate with existing database connection code
+
+### Supported Connection Types
+
+- **Django connections** (default) - Standard Django database connections
+- **psycopg2** - PostgreSQL driver (sync only)
+- **psycopg3** - Modern PostgreSQL driver (sync and async)
+- **mysqlclient** - MySQL driver (sync only)
+- **pymysql** - Pure Python MySQL driver (sync only)
+- **aiomysql** - Async MySQL driver (async only)
+- **asyncmy** - Another async MySQL driver (async only)
+
+### psycopg2 (PostgreSQL - Sync)
+
+```python
+import psycopg2
+from djazzle import DjazzleQuery, TableFromModel
+from myapp.models import User
+
+users = TableFromModel(User)
+
+# Create your own psycopg2 connection
+conn = psycopg2.connect("dbname=mydb user=myuser password=mypass")
+
+# Pass it to Djazzle
+db = DjazzleQuery(conn=conn)
+results = db.select().from_(users)()
+
+conn.close()
+```
+
+### psycopg3 (PostgreSQL - Sync)
+
+```python
+import psycopg
+from djazzle import DjazzleQuery, TableFromModel
+from myapp.models import User
+
+users = TableFromModel(User)
+
+# Create your own psycopg3 connection
+conn = psycopg.connect("dbname=mydb user=myuser password=mypass")
+
+# Pass it to Djazzle
+db = DjazzleQuery(conn=conn)
+results = db.select().from_(users)()
+
+conn.close()
+```
+
+### psycopg3 (PostgreSQL - Async)
+
+```python
+import asyncio
+import psycopg
+from djazzle import DjazzleQuery, TableFromModel
+from myapp.models import User
+
+users = TableFromModel(User)
+
+async def main():
+    # Create async connection using psycopg3
+    async with await psycopg.AsyncConnection.connect(
+        "dbname=mydb user=myuser password=mypass"
+    ) as conn:
+        # Pass it to Djazzle
+        db = DjazzleQuery(conn=conn)
+
+        # Use await syntax for queries
+        results = await db.select().from_(users)
+        print(results)
+
+asyncio.run(main())
+```
+
+### mysqlclient (MySQLdb)
+
+```python
+import MySQLdb
+from djazzle import DjazzleQuery, TableFromModel
+from myapp.models import User
+
+users = TableFromModel(User)
+
+# Create your own MySQLdb connection
+conn = MySQLdb.connect(
+    host="localhost",
+    user="myuser",
+    password="mypass",
+    database="mydb"
+)
+
+# Pass it to Djazzle
+db = DjazzleQuery(conn=conn)
+results = db.select().from_(users)()
+
+conn.close()
+```
+
+### Connection Pooling
+
+When using custom connections, you're responsible for managing connection pooling:
+
+```python
+# psycopg with Connection Pool
+from psycopg_pool import ConnectionPool
+
+pool = ConnectionPool("dbname=mydb user=myuser password=mypass")
+
+with pool.connection() as conn:
+    db = DjazzleQuery(conn=conn)
+    results = db.select().from_(users)()
+
+pool.close()
+```
+
+```python
+# aiomysql with Connection Pool
+import asyncio
+import aiomysql
+
+async def main():
+    pool = await aiomysql.create_pool(
+        host="localhost",
+        user="myuser",
+        password="mypass",
+        db="mydb",
+        minsize=1,
+        maxsize=10
+    )
+
+    async with pool.acquire() as conn:
+        db = DjazzleQuery(conn=conn)
+        results = await db.select().from_(users)
+
+    pool.close()
+    await pool.wait_closed()
+```
+
+### Important Notes
+
+1. **Django Models**: Djazzle still uses Django models for schema information via `TableFromModel`, but you can execute queries against any compatible database connection.
+
+2. **Async vs Sync**:
+   - Sync connections (psycopg2, mysqlclient, pymysql) must use the sync call syntax: `query()`
+   - Async connections (psycopg3 async, aiomysql, asyncmy) must use await syntax: `await query`
+   - Mixing sync and async will raise an error
+
+3. **Connection Management**: You're responsible for opening and closing connections, managing connection pools, handling connection errors, and transaction management.
+
+For more detailed examples and additional database drivers, see [CUSTOM_CONNECTIONS.md](CUSTOM_CONNECTIONS.md).
+
 ## API Reference
 
 ### Query Methods
@@ -764,6 +923,8 @@ python run_benchmarks.py \
   --iterations 200
   --format markdown
 ```
+
+By default, the benchmarks use sqlite, but you can pass `--use-postgres` to benchmark against a TestContainers Postgres docker database.
 
 This will generate detailed performance reports in JSON, CSV, and Markdown formats.
 

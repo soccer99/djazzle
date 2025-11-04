@@ -23,6 +23,7 @@ from .conditions import (
     or_,
 )
 from .query import DjazzleQuery
+from .connection import ConnectionAdapter
 from .exceptions import DjazzleError, InvalidColumnError
 from .utils import get_psycopg_dsn  # optional
 from .typing_utils import create_typed_table, create_typed_query
@@ -60,6 +61,7 @@ __all__ = [
     "or_",
     # Query builder
     "DjazzleQuery",
+    "ConnectionAdapter",
     # Exceptions
     "DjazzleError",
     "InvalidColumnError",

@@ -1,11 +1,12 @@
 from django.db import connection
-from typing import TypeVar, Dict, Any, Union
+from typing import TypeVar, Dict, Any, Union, Optional
 from .table import TableFromModel
 from .conditions import Condition, CompoundCondition
 from .exceptions import InvalidColumnError
 from django.db import models
 from .columns import Column, OrderDirection, Alias
 from asgiref.sync import sync_to_async
+from .connection import ConnectionAdapter
 
 
 T = TypeVar("T", bound=models.Model)
@@ -15,8 +16,24 @@ class DjazzleQuery:
     """Main query builder for Djazzle."""
 
     def __init__(self, conn=None):
+        """
+        Initialize a DjazzleQuery instance.
+
+        Args:
+            conn: Database connection. Can be:
+                - None (uses Django's default connection)
+                - Django connection object
+                - psycopg2 connection (PostgreSQL - sync only)
+                - psycopg3 connection (PostgreSQL - sync or async)
+                - mysqlclient connection (MySQLdb - sync only)
+                - pymysql connection (MySQL - sync only)
+                - aiomysql connection (MySQL - async only)
+                - asyncmy connection (MySQL - async only)
+        """
         # Use Django default connection if none provided
-        self.conn = conn or connection
+        raw_conn = conn or connection
+        self.conn_adapter = ConnectionAdapter(raw_conn)
+        self.conn = raw_conn  # Keep reference to raw connection for compatibility
         self._table: TableFromModel | None = None
         self._fields: list[str | Column | Alias] | None = None
         self._conditions: list[Condition | CompoundCondition] = []
@@ -615,8 +632,15 @@ class DjazzleQuery:
     def _execute(self):
         sql, params = self._build_sql()
 
-        # Use Django connection cursor
-        with self.conn.cursor() as cur:
+        # Check for async connection
+        if self.conn_adapter.is_async:
+            raise RuntimeError(
+                f"Cannot use synchronous execute() with async connection type '{self.conn_adapter.conn_type}'. "
+                f"Use await syntax instead: await query()"
+            )
+
+        # Use connection adapter to get cursor
+        with self.conn_adapter.cursor() as cur:
             cur.execute(sql, params)
 
             if self._query_type == "insert":
@@ -656,7 +680,7 @@ class DjazzleQuery:
                 if self._as_model:
                     # Use from_db() for faster model instantiation - bypasses __init__
                     model_cls: type[models.Model] = self._table.model_class
-                    db_alias = self.conn.alias
+                    db_alias = self.conn_adapter.get_db_alias()
                     return [
                         model_cls.from_db(db_alias, columns, row)
                         for row in cur.fetchall()
@@ -667,21 +691,33 @@ class DjazzleQuery:
 
     async def _aexecute(self):
         """
-        Async version of query execution using Django's async database support.
+        Async version of query execution.
+
+        Supports:
+        - Django async connections (using sync_to_async)
+        - Native async connections (aiomysql, asyncmy)
 
         Returns:
             Query results (same format as synchronous execution)
 
         Note:
-            This method uses sync_to_async to safely execute database operations
-            in async contexts. It obtains the database connection inside the sync
-            context to avoid thread-safety issues, as per Django 5.2+ guidelines.
+            For Django connections, this method uses sync_to_async to safely
+            execute database operations in async contexts. It obtains the
+            database connection inside the sync context to avoid thread-safety
+            issues, as per Django 5.2+ guidelines.
         """
         sql, params = self._build_sql()
+
+        # Handle native async connections (aiomysql, asyncmy)
+        if self.conn_adapter.is_async:
+            return await self._execute_native_async(sql, params)
+
+        # Handle Django connections with sync_to_async
         query_type = self._query_type
         returning_fields = self._returning_fields
         as_model = self._as_model
         table = self._table
+        conn_adapter = self.conn_adapter
 
         # Use sync_to_async to wrap the synchronous database operation
         # IMPORTANT: We must get the connection inside the sync context, not pass it
@@ -732,7 +768,7 @@ class DjazzleQuery:
                     if as_model:
                         # Use from_db() for faster model instantiation - bypasses __init__
                         model_cls: type[models.Model] = table.model_class
-                        db_alias = thread_local_conn.alias
+                        db_alias = conn_adapter.get_db_alias()
                         return [
                             model_cls.from_db(db_alias, columns, row)
                             for row in cur.fetchall()
@@ -742,6 +778,67 @@ class DjazzleQuery:
                         return results
 
         return await execute_query()
+
+    async def _execute_native_async(self, sql: str, params: list[Any]):
+        """
+        Execute query using native async connections (aiomysql, asyncmy).
+
+        Args:
+            sql: SQL query string
+            params: Query parameters
+
+        Returns:
+            Query results
+        """
+        # Get async cursor using context manager
+        async with await self.conn_adapter.async_cursor() as cur:
+            await cur.execute(sql, params)
+
+            if self._query_type == "insert":
+                # Handle INSERT queries
+                if self._returning_fields is not None:
+                    # RETURNING clause specified, fetch results
+                    columns = [desc[0] for desc in cur.description]
+                    results = [dict(zip(columns, row)) for row in await cur.fetchall()]
+                    return results
+                else:
+                    # No RETURNING, return None
+                    return None
+            elif self._query_type == "update":
+                # Handle UPDATE queries
+                if self._returning_fields is not None:
+                    # RETURNING clause specified, fetch results
+                    columns = [desc[0] for desc in cur.description]
+                    results = [dict(zip(columns, row)) for row in await cur.fetchall()]
+                    return results
+                else:
+                    # No RETURNING, return None
+                    return None
+            elif self._query_type == "delete":
+                # Handle DELETE queries
+                if self._returning_fields is not None:
+                    # RETURNING clause specified, fetch results
+                    columns = [desc[0] for desc in cur.description]
+                    results = [dict(zip(columns, row)) for row in await cur.fetchall()]
+                    return results
+                else:
+                    # No RETURNING, return None
+                    return None
+            else:
+                # Handle SELECT queries
+                columns = [desc[0] for desc in cur.description]
+
+                if self._as_model:
+                    # Use from_db() for faster model instantiation - bypasses __init__
+                    model_cls: type[models.Model] = self._table.model_class
+                    db_alias = self.conn_adapter.get_db_alias()
+                    return [
+                        model_cls.from_db(db_alias, columns, row)
+                        for row in await cur.fetchall()
+                    ]
+                else:
+                    results = [dict(zip(columns, row)) for row in await cur.fetchall()]
+                    return results
 
     def __await__(self):
         """

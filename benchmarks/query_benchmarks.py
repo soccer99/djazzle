@@ -8,6 +8,9 @@ Use run_benchmarks.py in the project root for standalone execution.
 from tests.models import User
 from src.djazzle import TableFromModel, DjazzleQuery, eq, desc, like
 from .benchmark_runner import BenchmarkRunner
+import django
+from django.conf import settings
+from testcontainers.postgres import PostgresContainer
 
 
 def setup_test_data(num_records: int = 10000):
@@ -343,13 +346,3 @@ def run_all_benchmarks(
 
     print("\nBenchmarks complete!\n")
     return runner
-
-
-if __name__ == "__main__":
-    print("Error: Please use run_benchmarks.py in the project root to run benchmarks.")
-    print("\nUsage:")
-    print("  python run_benchmarks.py --records 10000 --iterations 100")
-    print("\nFor more options:")
-    print("  python run_benchmarks.py --help")
-    import sys
-    sys.exit(1)
