@@ -67,6 +67,28 @@ class ComparisonResult:
         return asdict(self)
 
 
+@dataclass
+class MultiComparisonResult:
+    """Results comparing multiple implementations (Django, Djazzle, psycopg2, psycopg3)."""
+    name: str
+    description: str
+    iterations: int
+
+    # Implementation results: {implementation_name: {metric: value}}
+    implementations: Dict[str, Dict[str, float]]
+
+    # Comparison metrics relative to Django ORM baseline
+    speedups: Dict[str, float]  # {implementation_name: speedup_vs_django}
+    percent_differences: Dict[str, float]  # {implementation_name: percent_diff_vs_django}
+
+    records_processed: int
+    timestamp: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return asdict(self)
+
+
 class BenchmarkRunner:
     """Professional benchmark runner with statistical analysis."""
 
@@ -75,6 +97,7 @@ class BenchmarkRunner:
         self.output_dir.mkdir(exist_ok=True)
         self.results: List[BenchmarkResult] = []
         self.comparisons: List[ComparisonResult] = []
+        self.multi_comparisons: List[MultiComparisonResult] = []
 
     def run_single(
         self,
@@ -213,6 +236,85 @@ class BenchmarkRunner:
         self.comparisons.append(comparison)
         return comparison
 
+    def run_multi_comparison(
+        self,
+        name: str,
+        description: str,
+        implementations: Dict[str, Callable],
+        iterations: int = 100,
+        warmup: int = 10
+    ) -> MultiComparisonResult:
+        """
+        Run a multi-way comparison benchmark across multiple implementations.
+
+        Args:
+            name: Benchmark name
+            description: Benchmark description
+            implementations: Dict mapping implementation name to query function
+                           e.g., {"Django ORM": django_func, "Djazzle": djazzle_func,
+                                  "psycopg2": psycopg2_func, "psycopg3": psycopg3_func}
+            iterations: Number of iterations
+            warmup: Number of warmup iterations
+
+        Returns:
+            MultiComparisonResult with comparative statistics
+        """
+        # Run benchmarks for all implementations
+        impl_results = {}
+        for impl_name, impl_func in implementations.items():
+            result = self.run_single(
+                f"{name} ({impl_name})",
+                description,
+                impl_func,
+                iterations,
+                warmup
+            )
+            impl_results[impl_name] = {
+                "mean": result.mean,
+                "median": result.median,
+                "std_dev": result.std_dev,
+                "min": result.min,
+                "max": result.max,
+                "p95": result.p95,
+                "p99": result.p99,
+            }
+
+        # Calculate comparison metrics relative to Django ORM baseline
+        django_mean = impl_results.get("Django ORM", {}).get("mean", 0)
+        speedups = {}
+        percent_differences = {}
+
+        for impl_name, metrics in impl_results.items():
+            if impl_name == "Django ORM":
+                speedups[impl_name] = 0.0
+                percent_differences[impl_name] = 0.0
+            else:
+                if django_mean > 0:
+                    speedup = (django_mean - metrics["mean"]) / django_mean
+                    speedups[impl_name] = speedup
+                    percent_differences[impl_name] = speedup * 100
+                else:
+                    speedups[impl_name] = 0.0
+                    percent_differences[impl_name] = 0.0
+
+        # Get records processed from first implementation
+        first_impl = list(implementations.keys())[0]
+        records_processed = self.results[-len(implementations)].records_processed
+
+        multi_comparison = MultiComparisonResult(
+            name=name,
+            description=description,
+            iterations=iterations,
+            implementations=impl_results,
+            speedups=speedups,
+            percent_differences=percent_differences,
+            records_processed=records_processed,
+            timestamp=datetime.now().isoformat()
+        )
+
+        self.multi_comparisons.append(multi_comparison)
+        return multi_comparison
+
     def export_json(self, filename: str = None) -> Path:
         """Export results to JSON format."""
         if filename is None:
@@ -226,7 +328,8 @@ class BenchmarkRunner:
                 "python_version": sys.version,
             },
             "results": [r.to_dict() for r in self.results],
-            "comparisons": [c.to_dict() for c in self.comparisons]
+            "comparisons": [c.to_dict() for c in self.comparisons],
+            "multi_comparisons": [mc.to_dict() for mc in self.multi_comparisons]
         }
 
         with open(output_path, 'w') as f:
@@ -242,11 +345,49 @@ class BenchmarkRunner:
         output_path = self.output_dir / filename
 
         with open(output_path, 'w', newline='') as f:
+            # Export regular comparisons
             if self.comparisons:
                 writer = csv.DictWriter(f, fieldnames=self.comparisons[0].to_dict().keys())
                 writer.writeheader()
                 for comparison in self.comparisons:
                     writer.writerow(comparison.to_dict())
+
+            # Export multi-comparisons with flattened structure
+            if self.multi_comparisons:
+                # Create flattened rows for multi-comparisons
+                rows = []
+                for mc in self.multi_comparisons:
+                    row = {
+                        "name": mc.name,
+                        "description": mc.description,
+                        "iterations": mc.iterations,
+                        "records_processed": mc.records_processed,
+                        "timestamp": mc.timestamp,
+                    }
+                    # Add implementation-specific columns
+                    for impl_name, metrics in mc.implementations.items():
+                        safe_name = impl_name.replace(" ", "_").lower()
+                        row[f"{safe_name}_mean"] = metrics["mean"]
+                        row[f"{safe_name}_median"] = metrics["median"]
+                        row[f"{safe_name}_std_dev"] = metrics["std_dev"]
+
+                    # Add speedup columns
+                    for impl_name, speedup in mc.speedups.items():
+                        if impl_name != "Django ORM":
+                            safe_name = impl_name.replace(" ", "_").lower()
+                            row[f"{safe_name}_speedup"] = speedup
+                            row[f"{safe_name}_percent_diff"] = mc.percent_differences[impl_name]
+
+                    rows.append(row)
+
+                if rows:
+                    # Add a separator if we already wrote comparisons
+                    if self.comparisons:
+                        f.write("\n")
+
+                    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(rows)
 
         return output_path
 
@@ -262,8 +403,9 @@ class BenchmarkRunner:
             f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write(f"**Python Version:** {sys.version}\n\n")
 
+            # Export regular comparisons
             if self.comparisons:
-                f.write("## Comparison Results\n\n")
+                f.write("## Comparison Results (Django vs Djazzle)\n\n")
                 f.write("| Benchmark | Django ORM (ms) | Djazzle (ms) | Speedup | % Difference | Records |\n")
                 f.write("|-----------|-----------------|--------------|---------|--------------|----------|\n")
 
@@ -279,6 +421,51 @@ class BenchmarkRunner:
                            f"{comp.records_processed} |\n")
 
                 f.write("\n")
+
+            # Export multi-comparisons
+            if self.multi_comparisons:
+                f.write("## Multi-Implementation Comparison Results\n\n")
+                f.write("*All speedup/difference metrics are relative to Django ORM baseline*\n\n")
+
+                for mc in self.multi_comparisons:
+                    f.write(f"### {mc.name}\n\n")
+                    f.write(f"**Description:** {mc.description}\n\n")
+                    f.write(f"**Records:** {mc.records_processed} | **Iterations:** {mc.iterations}\n\n")
+
+                    # Create header row based on available implementations
+                    impl_names = list(mc.implementations.keys())
+                    header = "| Implementation |"
+                    separator = "|----------------|"
+                    for impl_name in impl_names:
+                        header += f" {impl_name} (ms) |"
+                        separator += "---------|"
+
+                    # Add speedup columns for non-Django implementations
+                    for impl_name in impl_names:
+                        if impl_name != "Django ORM":
+                            header += f" {impl_name} vs Django |"
+                            separator += "------------------|"
+
+                    f.write(header + "\n")
+                    f.write(separator + "\n")
+
+                    # Write data row
+                    row = "| Mean |"
+                    for impl_name in impl_names:
+                        metrics = mc.implementations[impl_name]
+                        row += f" {metrics['mean']:.4f} ± {metrics['std_dev']:.4f} |"
+
+                    # Add speedup columns
+                    for impl_name in impl_names:
+                        if impl_name != "Django ORM":
+                            speedup = mc.speedups[impl_name]
+                            percent_diff = mc.percent_differences[impl_name]
+                            if speedup > 0:
+                                row += f" {percent_diff:+.2f}% FASTER |"
+                            else:
+                                row += f" {percent_diff:+.2f}% SLOWER |"
+
+                    f.write(row + "\n\n")
 
             if self.results:
                 f.write("## Detailed Results\n\n")
@@ -306,7 +493,7 @@ class BenchmarkRunner:
         print("="*80 + "\n")
 
         if self.comparisons:
-            print("Comparison Summary:")
+            print("Comparison Summary (Django vs Djazzle):")
             print("-" * 80)
             for comp in self.comparisons:
                 print(f"\n{comp.name}")
@@ -321,4 +508,34 @@ class BenchmarkRunner:
 
                 print(f"  Records:     {comp.records_processed}")
 
-        print("\n" + "="*80 + "\n")
+        if self.multi_comparisons:
+            print("\n" + "="*80)
+            print("Multi-Implementation Comparison Summary:")
+            print("="*80 + "\n")
+            for mc in self.multi_comparisons:
+                print(f"{mc.name}")
+                print(f"  Description: {mc.description}")
+                print(f"  Records:     {mc.records_processed}")
+                print()
+
+                # Print each implementation's results
+                for impl_name, metrics in mc.implementations.items():
+                    print(f"  {impl_name:20} {metrics['mean']:8.4f}ms (± {metrics['std_dev']:.4f}ms)")
+
+                print()
+
+                # Print speedup comparisons (relative to Django ORM)
+                django_mean = mc.implementations.get("Django ORM", {}).get("mean", 0)
+                if django_mean > 0:
+                    print("  Speedup vs Django ORM:")
+                    for impl_name in mc.implementations.keys():
+                        if impl_name != "Django ORM":
+                            speedup = mc.speedups[impl_name]
+                            percent_diff = mc.percent_differences[impl_name]
+                            if speedup > 0:
+                                print(f"    {impl_name:18} {percent_diff:+7.2f}% FASTER")
+                            else:
+                                print(f"    {impl_name:18} {percent_diff:+7.2f}% SLOWER")
+                print()
+
+        print("="*80 + "\n")

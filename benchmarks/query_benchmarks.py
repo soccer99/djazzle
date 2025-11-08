@@ -5,12 +5,94 @@ Note: Django must be properly configured before importing this module.
 Use run_benchmarks.py in the project root for standalone execution.
 """
 
+import os
 from tests.models import User
 from src.djazzle import TableFromModel, DjazzleQuery, eq, desc, like
 from .benchmark_runner import BenchmarkRunner
 import django
 from django.conf import settings
-from testcontainers.postgres import PostgresContainer
+from typing import Optional
+
+
+# Global connection objects for psycopg2 and psycopg3
+_psycopg2_conn = None
+_psycopg3_conn = None
+
+
+def is_postgres_configured():
+    """Check if PostgreSQL is configured as the database backend."""
+    from django.conf import settings
+    engine = settings.DATABASES['default']['ENGINE']
+    return 'postgresql' in engine or 'psycopg' in engine
+
+
+def get_psycopg2_connection():
+    """Get or create a psycopg2 connection using Django settings."""
+    global _psycopg2_conn
+    if _psycopg2_conn is None:
+        if not is_postgres_configured():
+            raise RuntimeError("PostgreSQL is not configured. Use --use-postgres flag.")
+
+        import psycopg2
+        from django.db import connection
+        from django.conf import settings
+
+        # Use Django's connection to get the actual test database name
+        # Use connection.ensure_connection() to make sure connection is established
+        connection.ensure_connection()
+
+        # Get settings from Django's connection (which points to the test database)
+        db_settings = connection.settings_dict
+
+        _psycopg2_conn = psycopg2.connect(
+            dbname=db_settings['NAME'],
+            user=db_settings['USER'],
+            password=db_settings['PASSWORD'],
+            host=db_settings['HOST'],
+            port=db_settings['PORT']
+        )
+        _psycopg2_conn.autocommit = True
+    return _psycopg2_conn
+
+
+def get_psycopg3_connection():
+    """Get or create a psycopg3 connection using Django settings."""
+    global _psycopg3_conn
+    if _psycopg3_conn is None:
+        if not is_postgres_configured():
+            raise RuntimeError("PostgreSQL is not configured. Use --use-postgres flag.")
+
+        import psycopg
+        from django.db import connection
+        from django.conf import settings
+
+        # Use Django's connection to get the actual test database name
+        # Use connection.ensure_connection() to make sure connection is established
+        connection.ensure_connection()
+
+        # Get settings from Django's connection (which points to the test database)
+        db_settings = connection.settings_dict
+
+        _psycopg3_conn = psycopg.connect(
+            dbname=db_settings['NAME'],
+            user=db_settings['USER'],
+            password=db_settings['PASSWORD'],
+            host=db_settings['HOST'],
+            port=db_settings['PORT'],
+            autocommit=True
+        )
+    return _psycopg3_conn
+
+
+def close_psycopg_connections():
+    """Close psycopg connections."""
+    global _psycopg2_conn, _psycopg3_conn
+    if _psycopg2_conn:
+        _psycopg2_conn.close()
+        _psycopg2_conn = None
+    if _psycopg3_conn:
+        _psycopg3_conn.close()
+        _psycopg3_conn = None
 
 
 def setup_test_data(num_records: int = 10000):
@@ -40,7 +122,8 @@ def setup_test_data(num_records: int = 10000):
 def run_all_benchmarks(
     num_records: int = 10000,
     iterations: int = 100,
-    output_dir: str = "benchmark_results"
+    output_dir: str = "benchmark_results",
+    use_postgres: bool = False
 ) -> BenchmarkRunner:
     """
     Run all benchmarks comparing Djazzle and Django ORM.
@@ -49,6 +132,7 @@ def run_all_benchmarks(
         num_records: Number of records to create for testing
         iterations: Number of iterations per benchmark
         output_dir: Directory to save results
+        use_postgres: Whether to include psycopg2/psycopg3 benchmarks (requires PostgreSQL)
 
     Returns:
         BenchmarkRunner with all results
@@ -71,14 +155,39 @@ def run_all_benchmarks(
     def djazzle_select_all():
         return DjazzleQuery().select().from_(users_table)()
 
-    runner.run_comparison(
-        name="Select All Records",
-        description=f"Fetch all {num_records} records from database",
-        django_func=django_select_all,
-        djazzle_func=djazzle_select_all,
-        iterations=iterations // 2,  # Fewer iterations for large queries
-        warmup=5
-    )
+    # Check if we should run psycopg benchmarks (only if postgres is configured)
+    run_psycopg_benchmarks = use_postgres and is_postgres_configured()
+
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_select_all():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table)()
+
+        def djazzle_psycopg3_select_all():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table)()
+
+        runner.run_multi_comparison(
+            name="Select All Records",
+            description=f"Fetch all {num_records} records from database",
+            implementations={
+                "Django ORM": django_select_all,
+                "Djazzle": djazzle_select_all,
+                "Djazzle+psycopg2": djazzle_psycopg2_select_all,
+                "Djazzle+psycopg3": djazzle_psycopg3_select_all,
+            },
+            iterations=iterations // 2,
+            warmup=5
+        )
+    else:
+        runner.run_comparison(
+            name="Select All Records",
+            description=f"Fetch all {num_records} records from database",
+            django_func=django_select_all,
+            djazzle_func=djazzle_select_all,
+            iterations=iterations // 2,
+            warmup=5
+        )
 
     # Benchmark 2: Filtered Query (Single Match)
     print(f"2/{num_tests} Filtered query (single match)...")
@@ -91,14 +200,40 @@ def run_all_benchmarks(
             eq(users_table.name, "User10")
         )()
 
-    runner.run_comparison(
-        name="Filtered Query (Single Match)",
-        description="WHERE clause returning 1 record",
-        django_func=django_filtered_single,
-        djazzle_func=djazzle_filtered_single,
-        iterations=iterations,
-        warmup=10
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_filtered_single():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).where(
+                eq(users_table.name, "User10")
+            )()
+
+        def djazzle_psycopg3_filtered_single():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).where(
+                eq(users_table.name, "User10")
+            )()
+
+        runner.run_multi_comparison(
+            name="Filtered Query (Single Match)",
+            description="WHERE clause returning 1 record",
+            implementations={
+                "Django ORM": django_filtered_single,
+                "Djazzle": djazzle_filtered_single,
+                "Djazzle+psycopg2": djazzle_psycopg2_filtered_single,
+                "Djazzle+psycopg3": djazzle_psycopg3_filtered_single,
+            },
+            iterations=iterations,
+            warmup=10
+        )
+    else:
+        runner.run_comparison(
+            name="Filtered Query (Single Match)",
+            description="WHERE clause returning 1 record",
+            django_func=django_filtered_single,
+            djazzle_func=djazzle_filtered_single,
+            iterations=iterations,
+            warmup=10
+        )
 
     # Benchmark 3: Select Specific Columns
     print(f"3/{num_tests} Select specific columns...")
@@ -109,14 +244,36 @@ def run_all_benchmarks(
     def djazzle_select_columns():
         return DjazzleQuery().select("id", "name", "email").from_(users_table)()
 
-    runner.run_comparison(
-        name="Select Specific Columns",
-        description=f"Select 2 columns from {num_records} records",
-        django_func=django_select_columns,
-        djazzle_func=djazzle_select_columns,
-        iterations=iterations // 2,
-        warmup=5
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_select_columns():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).select("id", "name", "email").from_(users_table)()
+
+        def djazzle_psycopg3_select_columns():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).select("id", "name", "email").from_(users_table)()
+
+        runner.run_multi_comparison(
+            name="Select Specific Columns",
+            description=f"Select 3 columns from {num_records} records",
+            implementations={
+                "Django ORM": django_select_columns,
+                "Djazzle": djazzle_select_columns,
+                "Djazzle+psycopg2": djazzle_psycopg2_select_columns,
+                "Djazzle+psycopg3": djazzle_psycopg3_select_columns,
+            },
+            iterations=iterations // 2,
+            warmup=5
+        )
+    else:
+        runner.run_comparison(
+            name="Select Specific Columns",
+            description=f"Select 2 columns from {num_records} records",
+            django_func=django_select_columns,
+            djazzle_func=djazzle_select_columns,
+            iterations=iterations // 2,
+            warmup=5
+        )
 
     # Benchmark 4: Return Model Instances
     print(f"4/{num_tests} Return 50 rows as model instances...")
@@ -146,14 +303,36 @@ def run_all_benchmarks(
         results = DjazzleQuery().select().from_(users_table).limit(100)()
         return results
 
-    runner.run_comparison(
-        name="First 100 Records",
-        description="Fetch only first 100 records",
-        django_func=django_limit,
-        djazzle_func=djazzle_first_100,
-        iterations=iterations,
-        warmup=10
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_first_100():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).limit(100)()
+
+        def djazzle_psycopg3_first_100():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).limit(100)()
+
+        runner.run_multi_comparison(
+            name="First 100 Records",
+            description="Fetch only first 100 records",
+            implementations={
+                "Django ORM": django_limit,
+                "Djazzle": djazzle_first_100,
+                "Djazzle+psycopg2": djazzle_psycopg2_first_100,
+                "Djazzle+psycopg3": djazzle_psycopg3_first_100,
+            },
+            iterations=iterations,
+            warmup=10
+        )
+    else:
+        runner.run_comparison(
+            name="First 100 Records",
+            description="Fetch only first 100 records",
+            django_func=django_limit,
+            djazzle_func=djazzle_first_100,
+            iterations=iterations,
+            warmup=10
+        )
 
     # Benchmark 6: Order by name desc
     print(f"6/{num_tests} Order by name desc")
@@ -166,14 +345,36 @@ def run_all_benchmarks(
         dz_results = DjazzleQuery().select().from_(users_table).order_by(desc(users_table.name))()
         return dz_results
 
-    runner.run_comparison(
-        name="Order By",
-        description="Order by",
-        django_func=django_order_by,
-        djazzle_func=djazzle_order_by,
-        iterations=iterations,
-        warmup=10
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_order_by():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).order_by(desc(users_table.name))()
+
+        def djazzle_psycopg3_order_by():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).select().from_(users_table).order_by(desc(users_table.name))()
+
+        runner.run_multi_comparison(
+            name="Order By",
+            description="Order by name descending",
+            implementations={
+                "Django ORM": django_order_by,
+                "Djazzle": djazzle_order_by,
+                "Djazzle+psycopg2": djazzle_psycopg2_order_by,
+                "Djazzle+psycopg3": djazzle_psycopg3_order_by,
+            },
+            iterations=iterations,
+            warmup=10
+        )
+    else:
+        runner.run_comparison(
+            name="Order By",
+            description="Order by",
+            django_func=django_order_by,
+            djazzle_func=djazzle_order_by,
+            iterations=iterations,
+            warmup=10
+        )
 
     # Benchmark 7: INSERT Single Record
     print(f"7/{num_tests} INSERT single record...")
@@ -205,14 +406,50 @@ def run_all_benchmarks(
         })()
         return result
 
-    runner.run_comparison(
-        name="INSERT Single Record",
-        description="Insert one record into database",
-        django_func=django_insert,
-        djazzle_func=djazzle_insert,
-        iterations=iterations,
-        warmup=10
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_insert():
+            conn = get_psycopg2_connection()
+            result = DjazzleQuery(conn=conn).insert(users_table).values({
+                "name": "BenchmarkUser",
+                "age": 30,
+                "email": "benchmark@test.com",
+                "username": "benchmark_user",
+                "address": "123 Benchmark St"
+            })()
+            return result
+
+        def djazzle_psycopg3_insert():
+            conn = get_psycopg3_connection()
+            result = DjazzleQuery(conn=conn).insert(users_table).values({
+                "name": "BenchmarkUser",
+                "age": 30,
+                "email": "benchmark@test.com",
+                "username": "benchmark_user",
+                "address": "123 Benchmark St"
+            })()
+            return result
+
+        runner.run_multi_comparison(
+            name="INSERT Single Record",
+            description="Insert one record into database",
+            implementations={
+                "Django ORM": django_insert,
+                "Djazzle": djazzle_insert,
+                "Djazzle+psycopg2": djazzle_psycopg2_insert,
+                "Djazzle+psycopg3": djazzle_psycopg3_insert,
+            },
+            iterations=iterations,
+            warmup=10
+        )
+    else:
+        runner.run_comparison(
+            name="INSERT Single Record",
+            description="Insert one record into database",
+            django_func=django_insert,
+            djazzle_func=djazzle_insert,
+            iterations=iterations,
+            warmup=10
+        )
 
     # Clean up inserted records
     User.objects.filter(name="BenchmarkUser").delete()
@@ -239,14 +476,40 @@ def run_all_benchmarks(
         )()
         return result
 
-    runner.run_comparison(
-        name="UPDATE Single Record",
-        description="Update one record in database",
-        django_func=django_update,
-        djazzle_func=djazzle_update,
-        iterations=iterations,
-        warmup=10
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_update():
+            conn = get_psycopg2_connection()
+            return DjazzleQuery(conn=conn).update(users_table).set({"age": 26}).where(
+                eq(users_table.id, test_user.id)
+            )()
+
+        def djazzle_psycopg3_update():
+            conn = get_psycopg3_connection()
+            return DjazzleQuery(conn=conn).update(users_table).set({"age": 26}).where(
+                eq(users_table.id, test_user.id)
+            )()
+
+        runner.run_multi_comparison(
+            name="UPDATE Single Record",
+            description="Update one record in database",
+            implementations={
+                "Django ORM": django_update,
+                "Djazzle": djazzle_update,
+                "Djazzle+psycopg2": djazzle_psycopg2_update,
+                "Djazzle+psycopg3": djazzle_psycopg3_update,
+            },
+            iterations=iterations,
+            warmup=10
+        )
+    else:
+        runner.run_comparison(
+            name="UPDATE Single Record",
+            description="Update one record in database",
+            django_func=django_update,
+            djazzle_func=djazzle_update,
+            iterations=iterations,
+            warmup=10
+        )
 
     # Clean up test user
     test_user.delete()
@@ -286,14 +549,62 @@ def run_all_benchmarks(
         User.objects.filter(name__startswith="BulkUser").delete()
         return result
 
-    runner.run_comparison(
-        name="Bulk INSERT (100 records)",
-        description="Insert 100 records in one operation",
-        django_func=django_bulk_insert,
-        djazzle_func=djazzle_bulk_insert,
-        iterations=iterations // 2,  # Fewer iterations for bulk operations
-        warmup=5
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_bulk_insert():
+            conn = get_psycopg2_connection()
+            values = [
+                {
+                    "name": f"BulkUser{i}",
+                    "age": 20 + (i % 50),
+                    "email": f"bulk{i}@test.com",
+                    "username": f"bulk_user_{i}",
+                    "address": f"{i} Bulk St"
+                }
+                for i in range(100)
+            ]
+            result = DjazzleQuery(conn=conn).insert(users_table).values(values)()
+            # Delete immediately to avoid bloat
+            User.objects.filter(name__startswith="BulkUser").delete()
+            return result
+
+        def djazzle_psycopg3_bulk_insert():
+            conn = get_psycopg3_connection()
+            values = [
+                {
+                    "name": f"BulkUser{i}",
+                    "age": 20 + (i % 50),
+                    "email": f"bulk{i}@test.com",
+                    "username": f"bulk_user_{i}",
+                    "address": f"{i} Bulk St"
+                }
+                for i in range(100)
+            ]
+            result = DjazzleQuery(conn=conn).insert(users_table).values(values)()
+            # Delete immediately to avoid bloat
+            User.objects.filter(name__startswith="BulkUser").delete()
+            return result
+
+        runner.run_multi_comparison(
+            name="Bulk INSERT (100 records)",
+            description="Insert 100 records in one operation",
+            implementations={
+                "Django ORM": django_bulk_insert,
+                "Djazzle": djazzle_bulk_insert,
+                "Djazzle+psycopg2": djazzle_psycopg2_bulk_insert,
+                "Djazzle+psycopg3": djazzle_psycopg3_bulk_insert,
+            },
+            iterations=iterations // 2,  # Fewer iterations for bulk operations
+            warmup=5
+        )
+    else:
+        runner.run_comparison(
+            name="Bulk INSERT (100 records)",
+            description="Insert 100 records in one operation",
+            django_func=django_bulk_insert,
+            djazzle_func=djazzle_bulk_insert,
+            iterations=iterations // 2,  # Fewer iterations for bulk operations
+            warmup=5
+        )
 
     # Benchmark 10: Bulk UPDATE (100 records)
     print(f"10/{num_tests} Bulk UPDATE (100 records)...")
@@ -332,17 +643,57 @@ def run_all_benchmarks(
         )()
         return result
 
-    runner.run_comparison(
-        name="Bulk UPDATE (100 records)",
-        description="Update 100 records in one operation",
-        django_func=django_bulk_update,
-        djazzle_func=djazzle_bulk_update,
-        iterations=iterations // 2,  # Fewer iterations for bulk operations
-        warmup=5
-    )
+    if run_psycopg_benchmarks:
+        def djazzle_psycopg2_bulk_update():
+            conn = get_psycopg2_connection()
+            result = DjazzleQuery(conn=conn).update(users_table).set({"age": 25}).where(
+                like(users_table.name, "UpdateBulk%")
+            )()
+            # Reset for next iteration
+            DjazzleQuery(conn=conn).update(users_table).set({"age": 20}).where(
+                like(users_table.name, "UpdateBulk%")
+            )()
+            return result
+
+        def djazzle_psycopg3_bulk_update():
+            conn = get_psycopg3_connection()
+            result = DjazzleQuery(conn=conn).update(users_table).set({"age": 25}).where(
+                like(users_table.name, "UpdateBulk%")
+            )()
+            # Reset for next iteration
+            DjazzleQuery(conn=conn).update(users_table).set({"age": 20}).where(
+                like(users_table.name, "UpdateBulk%")
+            )()
+            return result
+
+        runner.run_multi_comparison(
+            name="Bulk UPDATE (100 records)",
+            description="Update 100 records in one operation",
+            implementations={
+                "Django ORM": django_bulk_update,
+                "Djazzle": djazzle_bulk_update,
+                "Djazzle+psycopg2": djazzle_psycopg2_bulk_update,
+                "Djazzle+psycopg3": djazzle_psycopg3_bulk_update,
+            },
+            iterations=iterations // 2,  # Fewer iterations for bulk operations
+            warmup=5
+        )
+    else:
+        runner.run_comparison(
+            name="Bulk UPDATE (100 records)",
+            description="Update 100 records in one operation",
+            django_func=django_bulk_update,
+            djazzle_func=djazzle_bulk_update,
+            iterations=iterations // 2,  # Fewer iterations for bulk operations
+            warmup=5
+        )
 
     # Clean up bulk update test records
     User.objects.filter(name__startswith="UpdateBulk").delete()
+
+    # Clean up psycopg connections if they were used
+    if run_psycopg_benchmarks:
+        close_psycopg_connections()
 
     print("\nBenchmarks complete!\n")
     return runner

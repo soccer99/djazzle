@@ -4,15 +4,27 @@ Standalone benchmark runner that properly sets up Django test database.
 """
 
 import os
+import time
+
 import django
 from django.conf import settings
 from django.test.utils import get_runner
 from contextlib import contextmanager
 
+os.environ["DJANGO_SETTINGS_MODULE"] = "tests.test_settings"
 
 @contextmanager
-def optional_postgres_container(enabled: bool):
-    """Context manager to optionally start a PostgreSQL Testcontainer."""
+def testcontainers_postgres(enabled: bool):
+    """Context manager to optionally start a PostgreSQL Testcontainer
+
+    Args:
+        enabled: Whether postgres is enabled
+
+    Yields:
+        Container object (or None if not enabled)
+        Sets env vars DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+        Caller must update settings.DATABASES after django.setup()
+    """
     if not enabled:
         yield None
         return
@@ -20,28 +32,18 @@ def optional_postgres_container(enabled: bool):
     from testcontainers.postgres import PostgresContainer
 
     print("Starting PostgreSQL Testcontainer...")
-    container = PostgresContainer("postgres:17")
+    container = PostgresContainer(
+        image="postgres:17", username="test", password="test", dbname="testdb"
+    )
     container.start()
     try:
-        # Extract connection info safely
-        db_name = container.env.get("POSTGRES_DB", "test")
-        db_user = container.env.get("POSTGRES_USER", "postgres")
-        db_password = container.env.get("POSTGRES_PASSWORD", "")
-        host = container.get_container_host_ip()
-        port = container.get_exposed_port(5432)
+        # Set environment variables for the caller to use
+        os.environ["DB_HOST"] = container.get_container_host_ip()
+        os.environ["DB_PORT"] = str(container.get_exposed_port(5432))
+        os.environ["DB_NAME"] = container.dbname
+        os.environ["DB_USER"] = container.username
+        os.environ["DB_PASSWORD"] = container.password
 
-        print(f"Using container DB: postgres://{db_user}@{host}:{port}/{db_name}")
-
-        settings.DATABASES = {
-            "default": {
-                "ENGINE": "django.db.backends.postgresql",
-                "NAME": db_name,
-                "USER": db_user,
-                "PASSWORD": db_password,
-                "HOST": host,
-                "PORT": port,
-            }
-        }
         yield container
     finally:
         print("Stopping PostgreSQL Testcontainer...")
@@ -67,9 +69,15 @@ if __name__ == "__main__":
         help="Number of iterations per benchmark (default: 100)",
     )
     parser.add_argument(
-        "--use-postgres",
+        "--database",
+        choices=["sqlite", "postgres", "mysql"],
+        default="sqlite",
+        help="Database backend to use (default: sqlite)",
+    )
+    parser.add_argument(
+        "--include-psycopg-tests",
         action="store_true",
-        help="Run benchmarks using PostgreSQL Testcontainer",
+        help="Include psycopg2/psycopg3 benchmarks (requires --database=postgres)",
     )
     parser.add_argument(
         "--output-dir",
@@ -86,18 +94,33 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Configure Django
-    os.environ["DJANGO_SETTINGS_MODULE"] = "tests.test_settings"
-    django.setup()
+    # Validate psycopg tests require postgres
+    if args.include_psycopg_tests and args.database != "postgres":
+        parser.error("--include-psycopg-tests requires --database=postgres")
 
-    from benchmarks.query_benchmarks import run_all_benchmarks
+    # Set up environment variables for postgres before Django setup
+    use_postgres = args.database == "postgres"
 
-    with optional_postgres_container(args.use_postgres):
+    # Configure Django (database settings picked up from environment variables)
+    with testcontainers_postgres(use_postgres):
+        django.setup()
+
+        if use_postgres:
+            print(f"Database configured: postgresql://{os.environ['DB_USER']}@{os.environ['DB_HOST']}:{os.environ['DB_PORT']}/{os.environ['DB_NAME']}")
+
+        from benchmarks.query_benchmarks import run_all_benchmarks
+
         # Setup test database
         print("Setting up test database...")
         TestRunner = get_runner(settings)
-        test_runner = TestRunner(verbosity=0, interactive=False, keepdb=True)
+        test_runner = TestRunner(verbosity=2, interactive=False, keepdb=False)
         old_config = test_runner.setup_databases()
+
+        # Debug: Print actual database connection settings
+        from django.db import connection
+        print(f"Test database settings: {connection.settings_dict['NAME']}")
+
+        # time.sleep(30)
 
         try:
             # Run benchmarks
@@ -105,6 +128,7 @@ if __name__ == "__main__":
                 num_records=args.records,
                 iterations=args.iterations,
                 output_dir=args.output_dir,
+                use_postgres=args.include_psycopg_tests,
             )
 
             # Print summary
